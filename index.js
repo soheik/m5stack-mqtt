@@ -6,7 +6,7 @@ const app = express();
 // 既定は HiveMQ の公開ブローカー。認証が必要なら環境変数で上書き。
 // 例) MQTT_URL=mqtt://user:pass@broker.example.com:1883
 const MQTT_URL = process.env.MQTT_URL || 'mqtt://broker.hivemq.com';
-const MQTT_TOPIC = process.env.MQTT_TOPIC || 'm5/notify';
+const MQTT_TOPIC = process.env.MQTT_TOPIC || 'm5/notify-bomb';
 
 // 接続（自動再接続有効）
 const mqttClient = mqtt.connect(MQTT_URL);
