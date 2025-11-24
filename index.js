@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const mqtt = require('mqtt');
 
 const app = express();
@@ -15,8 +16,8 @@ const config = {
     topic: process.env.MQTT_TOPIC,
   },
   rateLimit: {
-    windowMs: 1 * 1000,   // 1秒間の窓
-    maxRequests: 4,       // 1秒間に最大4回まで
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '1000', 10),     // デフォルト: 1秒
+    maxRequests: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '4', 10),  // デフォルト: 4回
   },
   server: {
     port: process.env.PORT || 3000,
@@ -41,7 +42,19 @@ function validateConfig() {
     logger.error('MQTT_TOPIC is not set in environment variables');
     process.exit(1);
   }
+
+  // レート制限の検証
+  if (config.rateLimit.windowMs <= 0) {
+    logger.error('RATE_LIMIT_WINDOW_MS must be greater than 0');
+    process.exit(1);
+  }
+  if (config.rateLimit.maxRequests <= 0) {
+    logger.error('RATE_LIMIT_MAX_REQUESTS must be greater than 0');
+    process.exit(1);
+  }
+
   logger.info('Configuration validated successfully');
+  logger.info(`[RATE_LIMIT] Window: ${config.rateLimit.windowMs}ms, Max Requests: ${config.rateLimit.maxRequests}`);
 }
 
 // =====================
@@ -54,40 +67,21 @@ const logger = {
 };
 
 // =====================
-// レート制限クラス
+// レート制限ミドルウェア
 // =====================
-class RateLimiter {
-  constructor(windowMs, maxRequests) {
-    this.windowMs = windowMs;
-    this.maxRequests = maxRequests;
-    this.store = new Map();
-  }
-
-  checkLimit(ip) {
-    const now = Date.now();
-    const entry = this.store.get(ip) || { count: 0, start: now };
-
-    // 窓の期間を過ぎていたらリセット
-    if (now - entry.start > this.windowMs) {
-      entry.count = 0;
-      entry.start = now;
-    }
-
-    // 制限を超えたら拒否
-    if (entry.count >= this.maxRequests) {
-      logger.warn(`[RATE_LIMIT_BLOCKED] IP: ${ip}, Count: ${entry.count}/${this.maxRequests}`);
-      return true;
-    }
-
-    // 制限内なら、カウント増加
-    entry.count += 1;
-    this.store.set(ip, entry);
-
-    logger.info(`[RATE_CHECK] IP: ${ip}, Count: ${entry.count}/${this.maxRequests}, Allowed`);
-
-    return false;
-  }
-}
+const notifyLimiter = rateLimit({
+  windowMs: config.rateLimit.windowMs,      // 1秒
+  max: config.rateLimit.maxRequests,        // 最大4回
+  keyGenerator: (req) => req.ip || req.connection.remoteAddress,
+  skip: false,
+  handler: (req, res, options) => {
+    logger.warn(`[RATE_LIMIT_BLOCKED] IP: ${req.ip || req.connection.remoteAddress}`);
+    res.status(429).json({ status: 'error', message: 'Too Many Requests' });
+  },
+  onLimitReached: (req, res, options) => {
+    logger.warn(`[RATE_LIMIT_REACHED] IP: ${req.ip || req.connection.remoteAddress}`);
+  },
+});
 
 // =====================
 // MQTT マネージャークラス
@@ -143,20 +137,12 @@ validateConfig();
 // =====================
 // インスタンス生成
 // =====================
-const rateLimiter = new RateLimiter(config.rateLimit.windowMs, config.rateLimit.maxRequests);
 const mqttManager = new MqttManager(config.mqtt.url, config.mqtt.topic);
 
 // =====================
 // ルート定義
 // =====================
-app.get('/notify', (req, res) => {
-  const ip = req.ip || req.connection.remoteAddress;
-
-  // レート制限チェック
-  if (rateLimiter.checkLimit(ip)) {
-    return res.status(429).json({ status: 'error', message: 'Too Many Requests' });
-  }
-
+app.get('/notify', notifyLimiter, (req, res) => {
   const message = req.query.message || 'No message';
   mqttManager.publish(message);
 
