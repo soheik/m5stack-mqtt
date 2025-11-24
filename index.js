@@ -3,6 +3,9 @@ const mqtt = require('mqtt');
 
 const app = express();
 
+// ★ プロキシの後ろでも正しくIPを取得
+app.set('trust proxy', true);
+
 // 既定は HiveMQ の公開ブローカー。認証が必要なら環境変数で上書き。
 // 例) MQTT_URL=mqtt://user:pass@broker.example.com:1883
 const MQTT_URL = process.env.MQTT_URL || 'mqtt://broker.hivemq.com';
@@ -55,6 +58,10 @@ mqttClient.on('close', () => { connected = false; console.log('[MQTT] closed'); 
 
 app.get('/notify', (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
+
+  // ★ デバッグログ
+  const entry = rateLimitStore.get(ip);
+  console.log(`[DEBUG] IP: ${ip}, Count: ${entry?.count || 0}, Max: ${MAX_REQUESTS}`);
 
   // ★ レート制限
   if (isOverLimit(ip)) {
