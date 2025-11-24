@@ -1,4 +1,3 @@
-// 環境変数の読み込み（.env ファイルから）
 require('dotenv').config();
 
 const express = require('express');
