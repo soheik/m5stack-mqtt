@@ -2,90 +2,145 @@ const express = require('express');
 const mqtt = require('mqtt');
 
 const app = express();
-
-// ★ プロキシの後ろでも正しくIPを取得
 app.set('trust proxy', true);
 
-// 既定は HiveMQ の公開ブローカー。認証が必要なら環境変数で上書き。
-// 例) MQTT_URL=mqtt://user:pass@broker.example.com:1883
-const MQTT_URL = process.env.MQTT_URL || 'mqtt://broker.hivemq.com';
-const MQTT_TOPIC = process.env.MQTT_TOPIC || 'm5/notify-bomb';
+// =====================
+// 設定の一元管理
+// =====================
+const config = {
+  mqtt: {
+    url: process.env.MQTT_URL || 'mqtt://broker.hivemq.com',
+    topic: process.env.MQTT_TOPIC || 'm5/notify-bomb',
+  },
+  rateLimit: {
+    windowMs: 10 * 1000,  // 10秒間の窓
+    maxRequests: 2,        // 10秒間に最大2回まで
+  },
+  server: {
+    port: process.env.PORT || 3000,
+  },
+};
 
-// 接続（自動再接続有効）
-const mqttClient = mqtt.connect(MQTT_URL);
+// =====================
+// ロギング統一
+// =====================
+const logger = {
+  info: (msg) => console.log(`[INFO] ${msg}`),
+  warn: (msg) => console.warn(`[WARN] ${msg}`),
+  error: (msg) => console.error(`[ERROR] ${msg}`),
+};
 
-// つながっていない瞬間の publish を吸収するシンプルなキュー
-const queue = [];
-let connected = false;
-
-// ★ レート制限用（IPごとに記録）
-const rateLimitStore = new Map();
-
-// 設定値（お好みで調整）
-const WINDOW_MS = 1 * 1000;       // 1秒間の窓
-const MAX_REQUESTS = 3;           // 1秒間に最大3回まで
-
-// レート制限チェック関数
-function isOverLimit(ip) {
-  const now = Date.now();
-  const entry = rateLimitStore.get(ip) || { count: 0, start: now };
-
-  // 窓の期間を過ぎていたらリセット
-  if (now - entry.start > WINDOW_MS) {
-    entry.count = 0;
-    entry.start = now;
+// =====================
+// レート制限クラス
+// =====================
+class RateLimiter {
+  constructor(windowMs, maxRequests) {
+    this.windowMs = windowMs;
+    this.maxRequests = maxRequests;
+    this.store = new Map();
   }
 
-  // ★ 先に判定してから、カウント内ならカウント増やす
-  if (entry.count >= MAX_REQUESTS) {
-    console.warn(`[RATE_LIMIT_BLOCKED] IP: ${ip}, Count: ${entry.count}/${MAX_REQUESTS}`);
-    return true;  // カウントを増やさずにブロック
+  checkLimit(ip) {
+    const now = Date.now();
+    const entry = this.store.get(ip) || { count: 0, start: now };
+
+    // 窓の期間を過ぎていたらリセット
+    if (now - entry.start > this.windowMs) {
+      entry.count = 0;
+      entry.start = now;
+    }
+
+    // 制限を超えたら拒否
+    if (entry.count >= this.maxRequests) {
+      logger.warn(`[RATE_LIMIT_BLOCKED] IP: ${ip}, Count: ${entry.count}/${this.maxRequests}`);
+      return true;
+    }
+
+    // 制限内なら、カウント増加
+    entry.count += 1;
+    this.store.set(ip, entry);
+
+    logger.info(`[RATE_CHECK] IP: ${ip}, Count: ${entry.count}/${this.maxRequests}, Allowed`);
+
+    return false;
   }
-
-  // 制限内なら、ここでカウント増加
-  entry.count += 1;
-  rateLimitStore.set(ip, entry);
-
-  console.log(`[RATE_CHECK] IP: ${ip}, Count: ${entry.count}/${MAX_REQUESTS}, Allowed`);
-
-  return false;
 }
 
-mqttClient.on('connect', () => {
-  connected = true;
-  while (queue.length) {
-    const { topic, message } = queue.shift();
-    mqttClient.publish(topic, message);
+// =====================
+// MQTT マネージャークラス
+// =====================
+class MqttManager {
+  constructor(mqttUrl, topic) {
+    this.topic = topic;
+    this.queue = [];
+    this.connected = false;
+    this.client = mqtt.connect(mqttUrl);
+    this.setupEventHandlers();
   }
-  console.log('[MQTT] connected');
-});
 
-mqttClient.on('reconnect', () => console.log('[MQTT] reconnecting...'));
-mqttClient.on('error', (err) => console.error('[MQTT] error:', err?.message));
-mqttClient.on('close', () => { connected = false; console.log('[MQTT] closed'); });
+  setupEventHandlers() {
+    this.client.on('connect', () => this.handleConnect());
+    this.client.on('reconnect', () => logger.info('[MQTT] reconnecting...'));
+    this.client.on('error', (err) => logger.error(`[MQTT] error: ${err?.message}`));
+    this.client.on('close', () => this.handleClose());
+  }
 
+  handleConnect() {
+    this.connected = true;
+    this.flushQueue();
+    logger.info('[MQTT] connected');
+  }
+
+  handleClose() {
+    this.connected = false;
+    logger.info('[MQTT] closed');
+  }
+
+  flushQueue() {
+    while (this.queue.length) {
+      const { topic, message } = this.queue.shift();
+      this.client.publish(topic, message);
+    }
+  }
+
+  publish(message) {
+    if (this.connected) {
+      this.client.publish(this.topic, message);
+    } else {
+      this.queue.push({ topic: this.topic, message });
+    }
+  }
+}
+
+// =====================
+// インスタンス生成
+// =====================
+const rateLimiter = new RateLimiter(config.rateLimit.windowMs, config.rateLimit.maxRequests);
+const mqttManager = new MqttManager(config.mqtt.url, config.mqtt.topic);
+
+// =====================
+// ルート定義
+// =====================
 app.get('/notify', (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
 
-  // ★ レート制限チェック（詳細ログは isOverLimit() 内で出力）
-  if (isOverLimit(ip)) {
+  // レート制限チェック
+  if (rateLimiter.checkLimit(ip)) {
     return res.status(429).json({ status: 'error', message: 'Too Many Requests' });
   }
 
   const message = req.query.message || 'No message';
-  if (connected) {
-    mqttClient.publish(MQTT_TOPIC, message);
-  } else {
-    queue.push({ topic: MQTT_TOPIC, message });
-  }
-  res.json({ status: 'ok', topic: MQTT_TOPIC, message });
+  mqttManager.publish(message);
+
+  res.json({ status: 'ok', topic: config.mqtt.topic, message });
 });
 
-// 健康チェック用（Railwayのヘルスチェックにも使える）
+// ヘルスチェック用
 app.get('/healthz', (_req, res) => res.send('ok'));
 
-// RailwayのPORTを必ず使う & 0.0.0.0 でbind
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`HTTP listening on :${PORT}`);
+// =====================
+// サーバー起動
+// =====================
+app.listen(config.server.port, '0.0.0.0', () => {
+  logger.info(`[SERVER] HTTP listening on :${config.server.port}`);
 });
