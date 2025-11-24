@@ -1,3 +1,6 @@
+// 環境変数の読み込み（.env ファイルから）
+require('dotenv').config();
+
 const express = require('express');
 const mqtt = require('mqtt');
 
@@ -9,17 +12,32 @@ app.set('trust proxy', true);
 // =====================
 const config = {
   mqtt: {
-    url: process.env.MQTT_URL || 'mqtt://broker.hivemq.com',
-    topic: process.env.MQTT_TOPIC || 'm5/notify-bomb',
+    url: process.env.MQTT_URL,
+    topic: process.env.MQTT_TOPIC,
   },
   rateLimit: {
-    windowMs: 10 * 1000,  // 10秒間の窓
-    maxRequests: 2,        // 10秒間に最大2回まで
+    windowMs: 1 * 1000,   // 1秒間の窓
+    maxRequests: 4,       // 1秒間に最大4回まで
   },
   server: {
     port: process.env.PORT || 3000,
   },
 };
+
+// =====================
+// 設定のバリデーション
+// =====================
+function validateConfig() {
+  if (!config.mqtt.url) {
+    logger.error('MQTT_URL is not set in environment variables');
+    process.exit(1);
+  }
+  if (!config.mqtt.topic) {
+    logger.error('MQTT_TOPIC is not set in environment variables');
+    process.exit(1);
+  }
+  logger.info('Configuration validated successfully');
+}
 
 // =====================
 // ロギング統一
@@ -111,6 +129,11 @@ class MqttManager {
     }
   }
 }
+
+// =====================
+// 起動前のバリデーション
+// =====================
+validateConfig();
 
 // =====================
 // インスタンス生成
