@@ -73,13 +73,10 @@ const notifyLimiter = rateLimit({
   windowMs: config.rateLimit.windowMs,      // 1秒
   max: config.rateLimit.maxRequests,        // 最大4回
   keyGenerator: (req) => req.ip || req.connection.remoteAddress,
-  skip: false,
+  skip: (req) => false,  // Changed from boolean to function for v7 compatibility
   handler: (req, res, options) => {
     logger.warn(`[RATE_LIMIT_BLOCKED] IP: ${req.ip || req.connection.remoteAddress}`);
     res.status(429).json({ status: 'error', message: 'Too Many Requests' });
-  },
-  onLimitReached: (req, res, options) => {
-    logger.warn(`[RATE_LIMIT_REACHED] IP: ${req.ip || req.connection.remoteAddress}`);
   },
 });
 
