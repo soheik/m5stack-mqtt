@@ -32,15 +32,23 @@ function isOverLimit(ip) {
 
   // 窓の期間を過ぎていたらリセット
   if (now - entry.start > WINDOW_MS) {
-    entry.count = 1;
+    entry.count = 0;
     entry.start = now;
-  } else {
-    entry.count += 1;
   }
 
+  // ★ 先に判定してから、カウント内ならカウント増やす
+  if (entry.count >= MAX_REQUESTS) {
+    console.warn(`[RATE_LIMIT_BLOCKED] IP: ${ip}, Count: ${entry.count}/${MAX_REQUESTS}`);
+    return true;  // カウントを増やさずにブロック
+  }
+
+  // 制限内なら、ここでカウント増加
+  entry.count += 1;
   rateLimitStore.set(ip, entry);
 
-  return entry.count > MAX_REQUESTS;
+  console.log(`[RATE_CHECK] IP: ${ip}, Count: ${entry.count}/${MAX_REQUESTS}, Allowed`);
+
+  return false;
 }
 
 mqttClient.on('connect', () => {
@@ -59,13 +67,8 @@ mqttClient.on('close', () => { connected = false; console.log('[MQTT] closed'); 
 app.get('/notify', (req, res) => {
   const ip = req.ip || req.connection.remoteAddress;
 
-  // ★ デバッグログ
-  const entry = rateLimitStore.get(ip);
-  console.log(`[DEBUG] IP: ${ip}, Count: ${entry?.count || 0}, Max: ${MAX_REQUESTS}`);
-
-  // ★ レート制限
+  // ★ レート制限チェック（詳細ログは isOverLimit() 内で出力）
   if (isOverLimit(ip)) {
-    console.warn(`[RATE LIMIT] too many requests from ${ip}`);
     return res.status(429).json({ status: 'error', message: 'Too Many Requests' });
   }
 
