@@ -27,6 +27,12 @@ const config = {
 // 設定のバリデーション
 // =====================
 function validateConfig() {
+  // デバッグ: 環境変数の状態をログ出力
+  logger.info(`DEBUG: process.env.MQTT_URL = ${process.env.MQTT_URL}`);
+  logger.info(`DEBUG: process.env.MQTT_TOPIC = ${process.env.MQTT_TOPIC}`);
+  logger.info(`DEBUG: config.mqtt.url = ${config.mqtt.url}`);
+  logger.info(`DEBUG: config.mqtt.topic = ${config.mqtt.topic}`);
+  
   if (!config.mqtt.url) {
     logger.error('MQTT_URL is not set in environment variables');
     process.exit(1);
